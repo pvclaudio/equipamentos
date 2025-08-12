@@ -204,9 +204,13 @@ if use_agent:
             dfb = pd.read_parquet(fp)
 
             # Sanitização forte antes de mandar para o agente
-            if "id_evento" not in dfb.columns:
-                dfb["id_evento"] = dfb.index
-            dfb["id_evento"] = pd.to_numeric(dfb["id_evento"], errors="coerce").fillna(dfb.index).astype(int)
+            if "id_evento" in dfb.columns:
+                s = pd.to_numeric(dfb["id_evento"], errors="coerce")
+                # onde for NaN, usa 0..N-1
+                s = s.where(s.notna(), np.arange(len(s)))
+                dfb["id_evento"] = s.astype(int)
+            else:
+                dfb["id_evento"] = np.arange(len(dfb), dtype=int)
 
             dfb["ativo"] = dfb.get("ativo", "").astype(str).fillna("").str.strip()
             dfb["justificativa"] = dfb.get("justificativa", "").astype(str).fillna("").str.strip()

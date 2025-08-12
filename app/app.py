@@ -3,18 +3,18 @@ import os
 from pathlib import Path
 from io import BytesIO
 import sys
-import re
+import urllib3
 
-import pandas as pd
 import numpy as np
-import streamlit as st
+import pandas as pd
 import plotly.express as px
+import streamlit as st
 
-# =============================
-# Configurações gerais
-# =============================
+# ------------------------------------------------------------------
+# Configuração básica
+# ------------------------------------------------------------------
 st.set_page_config(page_title="Criticidade de Equipamentos PRIO", layout="wide")
-ROOT = Path(__file__).resolve().parents[1]  # raiz do projeto
+ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
@@ -22,101 +22,71 @@ OUT_DIR = Path("outputs")
 DATA_DIR = Path("data")
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
-# =============================
-# Integração com o pipeline
-# =============================
+# ------------------------------------------------------------------
+# Pipeline
+# ------------------------------------------------------------------
 from src.ingestao import run_ingestao
 from src.matching import aplicar_matching
 
-
 def ensure_pipeline() -> bool:
-    """Gera outputs/eventos_qualificados.parquet e log_matching.parquet se ainda não existirem."""
-    parquet_evt = OUT_DIR / "eventos_qualificados.parquet"
-    parquet_log = OUT_DIR / "log_matching.parquet"
-    if parquet_evt.exists() and parquet_log.exists():
+    """Gera os artefatos mínimos do dashboard se ainda não existirem."""
+    evt_ok = (OUT_DIR / "eventos_qualificados.parquet").exists()
+    log_ok = (OUT_DIR / "log_matching.parquet").exists()
+    if evt_ok and log_ok:
         return True
     with st.spinner("Rodando ingestão e matching para preparar os dados..."):
-        run_ingestao()       # (a) ingestão/limpeza
-        aplicar_matching()   # (b) matching + logs
-    ok = parquet_evt.exists() and parquet_log.exists()
-    if not ok:
+        run_ingestao()
+        aplicar_matching()
+    evt_ok = (OUT_DIR / "eventos_qualificados.parquet").exists()
+    log_ok = (OUT_DIR / "log_matching.parquet").exists()
+    if not (evt_ok and log_ok):
         st.error("Não consegui gerar os artefatos do pipeline. Verifique os arquivos em data/ e tente novamente.")
-    return ok
+    return evt_ok and log_ok
 
-
-# =============================
-# Utilitários
-# =============================
+# ------------------------------------------------------------------
+# Utilitários simples (download)
+# ------------------------------------------------------------------
 def _bytes_csv(df: pd.DataFrame) -> bytes:
     return df.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig")
 
-
-def _bytes_excel(sheets: dict[str, pd.DataFrame], file_name: str = "export.xlsx") -> bytes:
+def _bytes_excel(sheets: dict[str, pd.DataFrame]) -> bytes:
     bio = BytesIO()
     with pd.ExcelWriter(bio, engine="xlsxwriter") as writer:
         for name, df in sheets.items():
-            sheet_name = str(name)[:31] if name else "Sheet1"
-            df.to_excel(writer, sheet_name=sheet_name, index=False)
+            sheet = str(name)[:31] if name else "Sheet1"
+            df.to_excel(writer, sheet_name=sheet, index=False)
     bio.seek(0)
     return bio.read()
 
-
-# ---------- Coerção numérica segura ----------
-# Não mexe em números já-numéricos, só converte "pt-BR" se tiver vírgula,
-# e NUNCA altera strings em notação científica (e.g., "1.23e+05").
-SCI_RE = re.compile(r'^[+-]?\d+(?:\.\d+)?[eE][+-]?\d+$')
-
-def coerce_number_ptbr(series: pd.Series) -> pd.Series:
-    # Numérico -> só coerce
-    if hasattr(series, "dtype") and series.dtype.kind in "biufc":
-        return pd.to_numeric(series, errors="coerce")
-
-    s = series.astype(str).str.strip()
-
-    # notação científica -> to_numeric direto (não tocar)
-    mask_sci = s.str.match(SCI_RE)
-
-    # strings com vírgula decimal -> remover separador de milhar "." e trocar "," por "."
-    mask_pt = (~mask_sci) & s.str.contains(",", na=False)
-    s = s.where(~mask_pt, s.str.replace(".", "", regex=False).str.replace(",", ".", regex=False))
-
-    # demais casos -> to_numeric direto
+def _to_float_ptbr(x):
+    if pd.isna(x):
+        return np.nan
+    if isinstance(x, (int, float, np.integer, np.floating)):
+        return float(x)
+    s = str(x).strip()
+    if s == "":
+        return np.nan
+    if "," in s:
+        s = s.replace(".", "").replace(",", ".")
+        return pd.to_numeric(s, errors="coerce")
     return pd.to_numeric(s, errors="coerce")
-# ---------------------------------------------
 
-
-@st.cache_data(show_spinner=False)
-def load_eventos_qualificados() -> pd.DataFrame:
-    """Lê o parquet final e corrige tipos:
-       - data_evento -> datetime
-       - periodo_h   -> horas (float)
-       - bbl         -> inteiro (Int64)
-    """
+# ------------------------------------------------------------------
+# Dados de entrada para dashboard
+# ------------------------------------------------------------------
+def _load_eventos_qualificados() -> pd.DataFrame:
     fp = OUT_DIR / "eventos_qualificados.parquet"
     if not fp.exists():
-        return pd.DataFrame(columns=[
-            "ativo", "data_evento", "equipamento", "periodo_h", "bbl", "justificativa"
-        ])
-
+        return pd.DataFrame(columns=["ativo","data_evento","equipamento","periodo_h","bbl","justificativa"])
     df = pd.read_parquet(fp)
-
-    # Datas
     if "data_evento" in df.columns:
         df["data_evento"] = pd.to_datetime(df["data_evento"], errors="coerce")
-
-    # Horas
-    if "periodo_h" in df.columns:
-        df["periodo_h"] = coerce_number_ptbr(df["periodo_h"])
-
-    # bbl inteiro
-    if "bbl" in df.columns:
-        df["bbl"] = coerce_number_ptbr(df["bbl"]).round().astype("Int64")
-
+    for col in ("periodo_h","bbl"):
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
     return df
 
-
-@st.cache_data(show_spinner=False)
-def load_log_matching() -> pd.DataFrame:
+def _load_log_matching() -> pd.DataFrame:
     fp = OUT_DIR / "log_matching.parquet"
     if not fp.exists():
         return pd.DataFrame()
@@ -125,56 +95,70 @@ def load_log_matching() -> pd.DataFrame:
         df["data_evento"] = pd.to_datetime(df["data_evento"], errors="coerce")
     return df
 
+# ------------------------------------------------------------------
+# Brent / perda financeira
+# ------------------------------------------------------------------
+def apply_brent(df: pd.DataFrame, brent_value: float | None, brent_series: dict[str, float] | None):
+    df = df.copy()
+    # tipos
+    if "data_evento" in df.columns:
+        df["data_evento"] = pd.to_datetime(df["data_evento"], errors="coerce")
+    for c in ("bbl","periodo_h"):
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
 
-@st.cache_data(show_spinner=False)
-def load_rankings_precomp():
-    files = {
-        "horas": OUT_DIR / "rank_por_horas.parquet",
-        "bbl": OUT_DIR / "rank_por_bbl.parquet",
-        "usd": OUT_DIR / "rank_por_usd.parquet",
-        "comp": OUT_DIR / "rank_composto.parquet",
-    }
-    dfs = {}
-    for k, p in files.items():
-        if p.exists():
-            dfs[k] = pd.read_parquet(p)
-    return dfs
+    if df.empty:
+        df["brent_usd"] = np.nan
+        df["perda_financeira_usd"] = 0.0
+        return df
 
+    if brent_series:
+        yyyymm = df["data_evento"].dt.strftime("%Y-%m")
+        df["brent_usd"] = yyyymm.map(brent_series).astype(float)
+        if brent_value is not None:
+            df.loc[df["brent_usd"].isna(), "brent_usd"] = float(brent_value)
+    else:
+        df["brent_usd"] = float(brent_value if brent_value is not None else 80.0)
 
-# =============================
-# Garantir dados
-# =============================
+    df["perda_financeira_usd"] = df["bbl"].fillna(0) * df["brent_usd"].fillna(0)
+    return df
+
+# ------------------------------------------------------------------
+# IA (agente)
+# ------------------------------------------------------------------
+try:
+    from src.agent_utils import explode_with_agent
+    _AGENT_AVAILABLE = True
+except Exception:
+    explode_with_agent = None  # type: ignore
+    _AGENT_AVAILABLE = False
+
+from src.whitelist import build_whitelist_map  # whitelist compartilhada
+
+# ------------------------------------------------------------------
+# Garantir dados base
+# ------------------------------------------------------------------
 ensure_pipeline()
+evt = _load_eventos_qualificados()
+log = _load_log_matching()
 
-# =============================
-# Sidebar (filtros e parâmetros)
-# =============================
+# ------------------------------------------------------------------
+# UI — Sidebar
+# ------------------------------------------------------------------
 st.title("Equipamentos — Eventos Qualificados")
 
-evt = load_eventos_qualificados()
-for col in ("bbl", "periodo_h"):
-    if col not in evt.columns:
-        evt[col] = np.nan
-
-log = load_log_matching()
-precomp = load_rankings_precomp()
-
 st.sidebar.header("Parâmetros")
-# Reprocessamento manual
-if st.sidebar.button("🔄 Reprocessar dados"):
+if st.sidebar.button("🔄 Reprocessar (ingestão + matching)"):
     if ensure_pipeline():
-        load_eventos_qualificados.clear()
-        load_log_matching.clear()
-        load_rankings_precomp.clear()
+        evt = _load_eventos_qualificados()
+        log = _load_log_matching()
         st.rerun()
 
-# Entrada de Brent
 brent_value = st.sidebar.number_input(
     "Brent (USD/bbl)", min_value=0.0, max_value=300.0, value=80.0, step=1.0,
-    help="Valor aplicado globalmente quando não houver série mensal para o mês do evento."
+    help="Valor aplicado quando não houver série mensal para o mês do evento."
 )
 
-# Série mensal opcional (CSV: yyyymm, brent_usd)
 brent_series = None
 with st.sidebar.expander("Série mensal (opcional)"):
     csv = st.file_uploader("CSV com colunas: yyyymm, brent_usd", type=["csv"], key="brent_csv")
@@ -193,36 +177,80 @@ with st.sidebar.expander("Série mensal (opcional)"):
         except Exception as e:
             st.error(f"Falha ao ler série mensal: {e}")
 
+# ------------------------------------------------------------------
+# Seção IA opcional
+# ------------------------------------------------------------------
+st.header("Identificação avançada por IA (opcional)")
+use_agent = st.checkbox("Habilitar agente para ler justificativas e identificar equipamentos (whitelist)", value=False)
+agent_model = st.selectbox("Modelo", options=["gpt-4o", "gpt-4o-mini"], index=0)
 
-# =============================
-# Brent - aplicar
-# =============================
-def apply_brent(df: pd.DataFrame, brent_value: float | None, brent_series: dict[str, float] | None):
-    df = df.copy()
-    if df.empty:
-        df["brent_usd"] = np.nan
-        df["perda_financeira_usd"] = 0.0
-        return df
+if use_agent:
+    # Rede ‘sem proxy’ + SSL relaxado
+    for k in ["HTTP_PROXY","HTTPS_PROXY","ALL_PROXY","http_proxy","https_proxy","all_proxy","no_proxy","NO_PROXY"]:
+        os.environ.pop(k, None)
+    os.environ["CURL_CA_BUNDLE"] = ""
+    os.environ["REQUESTS_CA_BUNDLE"] = ""
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+    st.info("⚠️ Modo rede ‘sem proxy’ + SSL relaxado ativo para o agente.")
 
-    # garante numérico correto para bbl
-    if "bbl" in df.columns:
-        df["bbl"] = coerce_number_ptbr(df["bbl"])
-
-    if brent_series:
-        yyyymm = df["data_evento"].dt.strftime("%Y-%m")
-        df["brent_usd"] = yyyymm.map(brent_series).astype(float)
-        if brent_value is not None:
-            df.loc[df["brent_usd"].isna(), "brent_usd"] = float(brent_value)
+    if not _AGENT_AVAILABLE:
+        st.warning("Agente indisponível nesta build (explode_with_agent não encontrado).")
     else:
-        df["brent_usd"] = float(brent_value if brent_value is not None else 80.0)
+        @st.cache_data(show_spinner=False)
+        def _load_eventos_base():
+            fp = OUT_DIR / "eventos_base.parquet"
+            if not fp.exists():
+                run_ingestao()
+            dfb = pd.read_parquet(fp)
 
-    df["perda_financeira_usd"] = df["bbl"].fillna(0) * df["brent_usd"].fillna(0)
-    return df
+            # Sanitização forte antes de mandar para o agente
+            if "id_evento" not in dfb.columns:
+                dfb["id_evento"] = dfb.index
+            dfb["id_evento"] = pd.to_numeric(dfb["id_evento"], errors="coerce").fillna(dfb.index).astype(int)
 
+            dfb["ativo"] = dfb.get("ativo", "").astype(str).fillna("").str.strip()
+            dfb["justificativa"] = dfb.get("justificativa", "").astype(str).fillna("").str.strip()
 
-# =============================
-# Filtros
-# =============================
+            if "data_evento" in dfb.columns:
+                dfb["data_evento"] = pd.to_datetime(dfb["data_evento"], errors="coerce")
+            else:
+                dfb["data_evento"] = pd.NaT
+
+            for c in ("periodo_h","bbl"):
+                dfb[c] = pd.to_numeric(dfb.get(c, np.nan), errors="coerce")
+
+            return dfb
+
+        df_base = _load_eventos_base().copy()
+        st.caption(f"Base de eventos para IA: {len(df_base)} linhas")
+
+        if st.button("🔍 Rodar agente (IA)"):
+            wl_map = build_whitelist_map()
+
+            prog = st.progress(0.0, text="Iniciando...")
+            def _cb(done, total):
+                prog.progress(done / max(total, 1), text=f"Evento {done}/{total}")
+
+            try:
+                out_df = explode_with_agent(df_base, wl_map, progress_cb=_cb, model=agent_model)
+                if out_df is None or out_df.empty:
+                    st.warning("Agente não retornou linhas qualificadas. Mantendo dados originais do matching.")
+                else:
+                    st.success(f"Agente concluiu: {len(out_df)} linhas qualificadas (multi‑equipamento já dividido).")
+                    # Substitui fonte e reaplica Brent mais adiante
+                    st.session_state["evt_from_agent"] = out_df[
+                        ["ativo","data_evento","equipamento","periodo_h","bbl","justificativa"]
+                    ].copy()
+            except Exception as e:
+                st.error(f"Falha geral do agente: {e}")
+
+# Usa o resultado do agente se existir
+if "evt_from_agent" in st.session_state:
+    evt = st.session_state["evt_from_agent"]
+
+# ------------------------------------------------------------------
+# Brent e filtros
+# ------------------------------------------------------------------
 if evt.empty:
     st.info("Sem dados em outputs/eventos_qualificados.parquet. Rode o pipeline.")
     st.stop()
@@ -251,123 +279,115 @@ if equip_sel:
 
 top_n = st.sidebar.slider("Top-N por métrica", min_value=5, max_value=30, value=20, step=1)
 
-# Garantir tipos numéricos ANTES dos KPIs/aggregations
+# ------------------------------------------------------------------
+# KPIs
+# ------------------------------------------------------------------
 for col in ["periodo_h", "bbl", "perda_financeira_usd", "brent_usd"]:
     if col in evt_f.columns:
-        evt_f[col] = coerce_number_ptbr(evt_f[col])
+        if evt_f[col].dtype == "object":
+            evt_f[col] = evt_f[col].apply(_to_float_ptbr)
+        evt_f[col] = pd.to_numeric(evt_f[col], errors="coerce")
 
-# =============================
-# KPIs
-# =============================
-col1, col2, col3, col4 = st.columns(4)
-col1.metric("Eventos qualificados", f"{len(evt_f):,}".replace(",", "."))
-col2.metric("Horas paradas", f"{evt_f['periodo_h'].sum():,.2f}".replace(",", "."))
-col3.metric("bbl perdidos", f"{evt_f['bbl'].sum():,.2f}".replace(",", "."))
-col4.metric("Perda financeira (USD)", f"{evt_f['perda_financeira_usd'].sum():,.2f}".replace(",", "."))
+c1, c2, c3, c4 = st.columns(4)
+c1.metric("Eventos qualificados", f"{len(evt_f):,}".replace(",", "."))
+c2.metric("Horas paradas", f"{evt_f['periodo_h'].sum():,.2f}".replace(",", "."))
+c3.metric("bbl perdidos", f"{evt_f['bbl'].sum():,.2f}".replace(",", "."))
+c4.metric("Perda financeira (USD)", f"{evt_f['perda_financeira_usd'].sum():,.2f}".replace(",", "."))
+st.caption("*Se a série mensal não cobrir algum mês, usamos o valor único de Brent informado no sidebar.*")
 
-st.caption("*Se a série mensal não cobrir algum mês, usamos o valor único de Brent informado no sidebar. Valores resultantes nesses meses são marcados como estimativas.*")
-
-# =============================
-# Agregações e rankings
-# =============================
+# ------------------------------------------------------------------
+# Agregações, Rankings e Gráficos
+# ------------------------------------------------------------------
 if evt_f.empty:
     st.info("Nenhum evento após filtros.")
+    st.stop()
+
+agg = (
+    evt_f.groupby(["ativo", "equipamento"], as_index=False)
+         .agg(eventos=("equipamento", "count"),
+              horas_paradas_total=("periodo_h", "sum"),
+              bbl_perdidos_total=("bbl", "sum"),
+              perda_financeira_total_USD=("perda_financeira_usd", "sum"))
+)
+
+rank_horas = agg.sort_values(["ativo", "horas_paradas_total"], ascending=[True, False])
+rank_bbl   = agg.sort_values(["ativo", "bbl_perdidos_total"], ascending=[True, False])
+rank_usd   = agg.sort_values(["ativo", "perda_financeira_total_USD"], ascending=[True, False])
+
+def _minmax(s):
+    s = s.fillna(0)
+    mn, mx = float(s.min()), float(s.max())
+    return (s - mn) / (mx - mn) if mx != mn else s * 0
+
+n_h = _minmax(agg["horas_paradas_total"])
+n_b = _minmax(agg["bbl_perdidos_total"])
+n_u = _minmax(agg["perda_financeira_total_USD"])
+agg_comp = agg.copy()
+w_h, w_b, w_u = 0.4, 0.3, 0.3
+agg_comp["score_composto"] = w_h * n_h + w_b * n_b + w_u * n_u
+rank_comp = agg_comp.sort_values(["ativo", "score_composto"], ascending=[True, False])
+
+st.subheader("Rankings por métrica")
+tabs = st.tabs(["Horas", "bbl", "USD", "Score Composto"])
+ranks = {"Horas": rank_horas, "bbl": rank_bbl, "USD": rank_usd, "Score Composto": rank_comp}
+for i, (name, df_) in enumerate(ranks.items()):
+    with tabs[i]:
+        topN = df_.groupby("ativo").head(top_n)
+        st.dataframe(topN, use_container_width=True)
+        cA, cB = st.columns(2)
+        with cA:
+            st.download_button(f"Baixar CSV (TopN {name})", data=_bytes_csv(topN),
+                               file_name=f"rank_{name}_Top{top_n}.csv", mime="text/csv")
+        with cB:
+            xls_bytes = _bytes_excel({"rank": topN})
+            st.download_button(f"Baixar Excel (TopN {name})", data=xls_bytes,
+                               file_name=f"rank_{name}_Top{top_n}.xlsx",
+                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+st.subheader("Gráficos")
+colg1, colg2 = st.columns(2)
+with colg1:
+    top_plot = rank_usd.groupby("ativo").head(top_n)
+    if not top_plot.empty:
+        fig = px.bar(top_plot, x="equipamento", y="perda_financeira_total_USD", color="ativo",
+                     title=f"Top-{top_n} por Perda Financeira (USD) — por Ativo")
+        fig.update_layout(xaxis_title="Equipamento", yaxis_title="Perda (USD)", legend_title="Ativo")
+        st.plotly_chart(fig, use_container_width=True)
+
+with colg2:
+    serie = evt_f.groupby([pd.Grouper(key="data_evento", freq="D"), "ativo"], as_index=False)[
+        ["periodo_h", "bbl", "perda_financeira_usd"]
+    ].sum()
+    fig2 = px.line(serie, x="data_evento", y="perda_financeira_usd", color="ativo",
+                   title="Série temporal — Perda Financeira (USD) por Ativo")
+    fig2.update_layout(xaxis_title="Data", yaxis_title="Perda (USD)", legend_title="Ativo")
+    st.plotly_chart(fig2, use_container_width=True)
+
+# ------------------------------------------------------------------
+# Tabelas finais
+# ------------------------------------------------------------------
+st.subheader("Eventos qualificados (após matching/IA)")
+st.dataframe(evt_f.sort_values(["ativo", "data_evento"]).reset_index(drop=True), use_container_width=True)
+st.download_button("Baixar eventos qualificados (CSV)", data=_bytes_csv(evt_f),
+                   file_name="eventos_qualificados_filtrados.csv", mime="text/csv")
+
+st.subheader("Trilha de auditoria do matching (LOG)")
+if not log.empty:
+    col_mencao = "menção_bruta" if "menção_bruta" in log.columns else ("mencao_bruta" if "mencao_bruta" in log.columns else None)
+    base_cols = ["id_evento","ativo","data_evento",col_mencao,"equipamento_candidato",
+                 "equipamento_canonizado","fonte","score","status","regra_aplicada"]
+    cols = [c for c in base_cols if c and c in log.columns]
+    log_view = log[cols].copy() if cols else log.copy()
+    if ativo_sel:
+        log_view = log_view[log_view["ativo"].isin(ativo_sel)]
+    if isinstance(periodo, (list, tuple)) and len(periodo) == 2 and "data_evento" in log_view.columns:
+        ini = pd.to_datetime(periodo[0]); fim = pd.to_datetime(periodo[1])
+        log_view = log_view[(pd.to_datetime(log_view["data_evento"], errors="coerce") >= ini) &
+                            (pd.to_datetime(log_view["data_evento"], errors="coerce") <= fim)]
+    st.dataframe(log_view, use_container_width=True)
+    st.download_button("Baixar LOG (CSV)", data=_bytes_csv(log_view),
+                       file_name="log_matching_filtrado.csv", mime="text/csv")
 else:
-    agg = (
-        evt_f.groupby(["ativo", "equipamento"], as_index=False)
-             .agg(eventos=("equipamento", "count"),
-                  horas_paradas_total=("periodo_h", "sum"),
-                  bbl_perdidos_total=("bbl", "sum"),
-                  perda_financeira_total_USD=("perda_financeira_usd", "sum"))
-    )
+    st.info("LOG não encontrado (outputs/log_matching.parquet). Rode o matching.")
 
-    rank_horas = agg.sort_values(["ativo", "horas_paradas_total"], ascending=[True, False])
-    rank_bbl   = agg.sort_values(["ativo", "bbl_perdidos_total"], ascending=[True, False])
-    rank_usd   = agg.sort_values(["ativo", "perda_financeira_total_USD"], ascending=[True, False])
-
-    def _minmax(s):
-        s = s.fillna(0)
-        mn, mx = float(s.min()), float(s.max())
-        return (s - mn) / (mx - mn) if mx != mn else s * 0
-    n_h = _minmax(agg["horas_paradas_total"])
-    n_b = _minmax(agg["bbl_perdidos_total"])
-    n_u = _minmax(agg["perda_financeira_total_USD"])
-    agg_comp = agg.copy()
-    w_h, w_b, w_u = 0.4, 0.3, 0.3
-    agg_comp["score_composto"] = w_h * n_h + w_b * n_b + w_u * n_u
-    rank_comp = agg_comp.sort_values(["ativo", "score_composto"], ascending=[True, False])
-
-    # Tabelas
-    st.subheader("Rankings por métrica")
-    tabs = st.tabs(["Horas", "bbl", "USD", "Score Composto"])
-    ranks = {"Horas": rank_horas, "bbl": rank_bbl, "USD": rank_usd, "Score Composto": rank_comp}
-
-    for i, (name, df_) in enumerate(ranks.items()):
-        with tabs[i]:
-            topN = df_.groupby("ativo").head(top_n)
-            st.dataframe(topN, use_container_width=True)
-            c1, c2 = st.columns([1, 1])
-            with c1:
-                st.download_button(
-                    "Baixar CSV (TopN)", data=_bytes_csv(topN), file_name=f"rank_{name}_Top{top_n}.csv",
-                    mime="text/csv"
-                )
-            with c2:
-                xls_bytes = _bytes_excel({"rank": topN})
-                st.download_button(
-                    "Baixar Excel (TopN)", data=xls_bytes, file_name=f"rank_{name}_Top{top_n}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                )
-
-    # Gráficos
-    st.subheader("Gráficos")
-    colg1, colg2 = st.columns(2)
-
-    with colg1:
-        top_plot = rank_usd.groupby("ativo").head(top_n)
-        if not top_plot.empty:
-            fig = px.bar(top_plot, x="equipamento", y="perda_financeira_total_USD", color="ativo",
-                         title=f"Top-{top_n} por Perda Financeira (USD) — por Ativo")
-            fig.update_layout(xaxis_title="Equipamento", yaxis_title="Perda (USD)", legend_title="Ativo")
-            st.plotly_chart(fig, use_container_width=True)
-
-    with colg2:
-        if not evt_f.empty:
-            serie = evt_f.groupby([pd.Grouper(key="data_evento", freq="D"), "ativo"], as_index=False)[
-                ["periodo_h", "bbl", "perda_financeira_usd"]
-            ].sum()
-            fig2 = px.line(serie, x="data_evento", y="perda_financeira_usd", color="ativo",
-                           title="Série temporal — Perda Financeira (USD) por Ativo")
-            fig2.update_layout(xaxis_title="Data", yaxis_title="Perda (USD)", legend_title="Ativo")
-            st.plotly_chart(fig2, use_container_width=True)
-
-    # Eventos & LOG
-    st.subheader("Eventos qualificados (após matching)")
-    st.dataframe(evt_f.sort_values(["ativo", "data_evento"]).reset_index(drop=True), use_container_width=True)
-    st.download_button(
-        "Baixar eventos qualificados (CSV)", data=_bytes_csv(evt_f), file_name="eventos_qualificados_filtrados.csv",
-        mime="text/csv"
-    )
-
-    st.subheader("Trilha de auditoria do matching (LOG)")
-    if not log.empty:
-        col_mencao = "menção_bruta" if "menção_bruta" in log.columns else ("mencao_bruta" if "mencao_bruta" in log.columns else None)
-        base_cols = ["id_evento","ativo","data_evento",col_mencao,"equipamento_candidato",
-                     "equipamento_canonizado","fonte","score","status","regra_aplicada"]
-        cols = [c for c in base_cols if c and c in log.columns]
-        log_view = log[cols].copy() if cols else log.copy()
-        if ativo_sel:
-            log_view = log_view[log_view["ativo"].isin(ativo_sel)]
-        if isinstance(periodo, (list, tuple)) and len(periodo) == 2 and "data_evento" in log_view.columns:
-            ini = pd.to_datetime(periodo[0]); fim = pd.to_datetime(periodo[1])
-            log_view = log_view[(pd.to_datetime(log_view["data_evento"], errors="coerce") >= ini) &
-                                (pd.to_datetime(log_view["data_evento"], errors="coerce") <= fim)]
-        st.dataframe(log_view, use_container_width=True)
-        st.download_button(
-            "Baixar LOG (CSV)", data=_bytes_csv(log_view), file_name="log_matching_filtrado.csv", mime="text/csv"
-        )
-    else:
-        st.info("LOG não encontrado (outputs/log_matching.parquet). Rode o matching.")
-
-# Rodapé
-st.caption("© PRIO — Dashboard de Criticidade de Equipamentos. Valores financeiros dependem do Brent informado/série mensal. Bravo≡TBMT e ABL≡Forte já normalizados no pipeline.")
+st.caption("© PRIO — Dashboard de Criticidade de Equipamentos. IA opcional com whitelist local.")

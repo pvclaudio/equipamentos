@@ -11,20 +11,34 @@ DATA_DIR = Path("data")
 OUT_DIR = Path("outputs")
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
-
 # ------------------------------------------------------------
 # Helpers
 # ------------------------------------------------------------
 def _split_top5(text: str) -> List[str]:
     """
     Quebra o campo 'top5' em itens usando separadores comuns.
+    ⚠️ Não quebra por hífen para preservar tags do tipo 'Tratador-XYZ'.
     Ex.: "Bomba A; Compressores / Tratador-XYZ" -> ["Bomba A", "Compressores", "Tratador-XYZ"]
     """
     if not isinstance(text, str):
         return []
-    parts = [p.strip() for p in re.split(r"[;,\n/|\-]+", text) if p and p.strip()]
+    # separadores: ; , / | (e quebras de linha)
+    parts = [p.strip() for p in re.split(r"[;,\n/|]+", text) if p and p.strip()]
+    # colapsa múltiplos espaços
+    parts = [re.sub(r"\s+", " ", p) for p in parts]
     return parts
 
+def _read_excel_safe(fp: Path, sheet: str | None = None, dtype=str) -> pd.DataFrame:
+    """Tenta ler a planilha 'sheet'; em caso de falha, usa a primeira disponível."""
+    if not fp.exists():
+        raise FileNotFoundError(f"Arquivo não encontrado: {fp}")
+    try:
+        return pd.read_excel(fp, sheet_name=sheet if sheet else 0, dtype=dtype)
+    except Exception:
+        xls = pd.ExcelFile(fp)
+        if not xls.sheet_names:
+            raise ValueError(f"Nenhuma planilha encontrada em {fp}")
+        return pd.read_excel(fp, sheet_name=xls.sheet_names[0], dtype=dtype)
 
 def _ensure_eventos_base() -> pd.DataFrame:
     """
@@ -46,7 +60,6 @@ def _ensure_eventos_base() -> pd.DataFrame:
     df = pd.read_parquet(fp_evt)
     return df
 
-
 def _ensure_bdo_clean() -> tuple[pd.DataFrame, pd.DataFrame]:
     """
     Gera/Carrega os parquets limpos de BDO:
@@ -62,13 +75,12 @@ def _ensure_bdo_clean() -> tuple[pd.DataFrame, pd.DataFrame]:
         base_bdos = pd.read_parquet(fp_bdo_clean)
     else:
         xls_bdo = DATA_DIR / "base_bdos.xlsx"
-        base_bdos = pd.read_excel(xls_bdo, sheet_name="query")
+        base_bdos = _read_excel_safe(xls_bdo, sheet="query", dtype=str)
 
         # normaliza ativo (Bravo≡Polvo≡TBMT; Forte≡ABL)
         if "ativo" in base_bdos.columns:
             base_bdos["ativo"] = base_bdos["ativo"].map(normalize_ativo)
         else:
-            # se não houver coluna 'ativo', cria vazia para evitar quebras adiante
             base_bdos["ativo"] = None
 
         # localizar coluna do top5 com tolerância a nomes
@@ -92,12 +104,12 @@ def _ensure_bdo_clean() -> tuple[pd.DataFrame, pd.DataFrame]:
     else:
         xls_lista = DATA_DIR / "Lista de Equipamentos - BDO.xlsx"
         sheets_want = ["Bravo", "Polvo", "Forte", "Frade"]
-        frames = []
+        frames: List[pd.DataFrame] = []
         xls = pd.ExcelFile(xls_lista)
         for sn in sheets_want:
             if sn not in xls.sheet_names:
                 continue
-            df = pd.read_excel(xls, sheet_name=sn)
+            df = pd.read_excel(xls, sheet_name=sn, dtype=str)
 
             # mapear colunas com tolerância a nomes
             cols = {strip_accents_lower(c): c for c in df.columns}
@@ -109,7 +121,7 @@ def _ensure_bdo_clean() -> tuple[pd.DataFrame, pd.DataFrame]:
                     break
 
             col_equip = None
-            for k in ("equipamento", "equipamentos", "tag", "descricao", "descrição"):
+            for k in ("equipamento", "equipamentos", "tag", "descricao", "descrição", "equip"):
                 if k in cols:
                     col_equip = cols[k]
                     break
@@ -122,9 +134,13 @@ def _ensure_bdo_clean() -> tuple[pd.DataFrame, pd.DataFrame]:
                 continue
 
             tmp = pd.DataFrame()
-            tmp["equipamento"] = df[col_equip].astype(str).str.strip()
+            tmp["equipamento"] = df[col_equip].fillna("").astype(str).str.strip()
+            # colapsa espaços internos
+            tmp["equipamento"] = tmp["equipamento"].str.replace(r"\s+", " ", regex=True)
+            # remove linhas vazias
+            tmp = tmp[tmp["equipamento"] != ""]
+
             tmp["ativo"] = df[col_ativo].map(normalize_ativo) if col_ativo else normalize_ativo(sn)
-            tmp = tmp[tmp["equipamento"].astype(str).str.strip() != ""]
             frames.append(tmp)
 
         if frames:
@@ -132,12 +148,20 @@ def _ensure_bdo_clean() -> tuple[pd.DataFrame, pd.DataFrame]:
         else:
             lista_bdo = pd.DataFrame(columns=["ativo", "equipamento"])
 
+        # normaliza ativo e dedup case-insensitive preservando a forma original
         lista_bdo["ativo"] = lista_bdo["ativo"].map(normalize_ativo)
-        lista_bdo = lista_bdo.drop_duplicates(subset=["ativo", "equipamento"]).reset_index(drop=True)
+        if not lista_bdo.empty:
+            # chave para dedupe: (ativo_norm, equip_norm)
+            key = (
+                lista_bdo["ativo"].astype(str).str.strip().str.lower()
+                + "||"
+                + lista_bdo["equipamento"].astype(str).str.strip().str.lower()
+            )
+            lista_bdo = lista_bdo.loc[~key.duplicated()].reset_index(drop=True)
+
         lista_bdo.to_parquet(fp_lista_clean, index=False)
 
     return base_bdos, lista_bdo
-
 
 # ------------------------------------------------------------
 # API pública consumida pelo matching
@@ -153,38 +177,66 @@ def carregar_bases() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     base_bdos, lista_bdo = _ensure_bdo_clean()
     return eventos, base_bdos, lista_bdo
 
-
 def construir_dicionarios() -> Tuple[Dict[str, Set[str]], Dict[str, Set[str]]]:
     """
     Retorna:
       - dict_equipamentos[ativo] = {equipamentos da Lista BDO}
       - dict_top5[ativo]        = {itens do top_5_itens_emergenciais (coluna 'top5')}
+    Observações:
+      - Deduplicação case-insensitive, preservando a grafia original como canônica.
+      - Itens vazios ou com 1 char são descartados.
     """
     _, base_bdos, lista_bdo = carregar_bases()
 
+    # ---------- dicionário de equipamentos ----------
     dict_equip: Dict[str, Set[str]] = {}
-    for ativo, sub in lista_bdo.groupby("ativo", dropna=True):
-        pool = set(str(x).strip() for x in sub["equipamento"].dropna().unique())
-        pool = {p for p in pool if p and len(p) >= 2}
-        if pool:
-            dict_equip[ativo] = pool
+    if not lista_bdo.empty and {"ativo", "equipamento"}.issubset(lista_bdo.columns):
+        for ativo, sub in lista_bdo.groupby("ativo", dropna=True):
+            pool_raw = [str(x).strip() for x in sub["equipamento"].dropna().tolist()]
+            pool_raw = [re.sub(r"\s+", " ", x) for x in pool_raw if x]
+            # dedupe case-insensitive preservando a 1ª ocorrência
+            seen_ci = set()
+            pool: List[str] = []
+            for x in pool_raw:
+                k = x.lower()
+                if k not in seen_ci and len(x) >= 2:
+                    pool.append(x)
+                    seen_ci.add(k)
+            if pool:
+                dict_equip[ativo] = set(pool)
 
+    # ---------- dicionário do top5 ----------
     dict_top5: Dict[str, Set[str]] = {}
     if "top5" in base_bdos.columns:
         for ativo, sub in base_bdos.groupby("ativo", dropna=True):
-            bucket = set()
+            bucket: List[str] = []
             for item in sub["top5"].dropna().astype(str):
                 for tok in _split_top5(item):
                     if tok:
-                        bucket.add(tok)
-            bucket = {b for b in bucket if b and len(b) >= 2}
-            if bucket:
-                dict_top5[ativo] = bucket
+                        bucket.append(tok)
+            # limpeza + dedupe case-insensitive
+            seen_ci = set()
+            clean_bucket: List[str] = []
+            for b in (re.sub(r"\s+", " ", x).strip() for x in bucket if x):
+                if len(b) < 2:
+                    continue
+                k = b.lower()
+                if k not in seen_ci:
+                    clean_bucket.append(b)
+                    seen_ci.add(k)
+            if clean_bucket:
+                dict_top5[ativo] = set(clean_bucket)
 
-    # snapshots para auditoria
-    snap_equip = pd.DataFrame([{"ativo": a, "equipamento": e} for a, ss in dict_equip.items() for e in ss])
-    snap_top5  = pd.DataFrame([{"ativo": a, "item": e}         for a, ss in dict_top5.items() for e in ss])
-    snap_equip.to_csv(OUT_DIR / "snapshot_dict_equipamentos.csv", index=False, encoding="utf-8-sig")
-    snap_top5.to_csv(OUT_DIR / "snapshot_dict_top5.csv", index=False, encoding="utf-8-sig")
+    # ---------- snapshots para auditoria ----------
+    try:
+        snap_equip = pd.DataFrame([{"ativo": a, "equipamento": e} for a, ss in dict_equip.items() for e in sorted(ss)])
+        snap_top5  = pd.DataFrame([{"ativo": a, "item": e}         for a, ss in dict_top5.items() for e in sorted(ss)])
+        if not snap_equip.empty:
+            snap_equip.to_csv(OUT_DIR / "snapshot_dict_equipamentos.csv", index=False, encoding="utf-8-sig")
+        if not snap_top5.empty:
+            snap_top5.to_csv(OUT_DIR / "snapshot_dict_top5.csv", index=False, encoding="utf-8-sig")
+    except Exception:
+        # snapshots são best-effort
+        pass
 
     return dict_equip, dict_top5

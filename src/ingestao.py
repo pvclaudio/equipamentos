@@ -5,10 +5,9 @@ import pandas as pd
 import numpy as np
 
 from .utils import (
-    parse_data_ptbr,
     normalize_ativo,
     to_float_ptbr,
-    to_int_ptbr,
+    to_int_ptbr,          # ok manter, mesmo que não use em todas as bases
     salvar_parquet,
     strip_accents_lower,
 )
@@ -47,7 +46,8 @@ def run_ingestao() -> pd.DataFrame:
         df_evt_out["ativo"] = None
 
     if col_dia:
-        df_evt_out["data_evento"] = parse_data_ptbr(df_evt[col_dia])
+        # ✅ substitui parse_data_ptbr por to_datetime com dayfirst
+        df_evt_out["data_evento"] = pd.to_datetime(df_evt[col_dia], dayfirst=True, errors="coerce")
     else:
         df_evt_out["data_evento"] = pd.NaT
 
@@ -64,7 +64,7 @@ def run_ingestao() -> pd.DataFrame:
 
     if col_bbl:
         bblf = raw_bbl.apply(to_float_ptbr)           # parse decimal corretamente
-        df_evt_out["bbl"] = pd.to_numeric(bblf, errors="coerce").round().astype("Int64")  # inteiro
+        df_evt_out["bbl"] = pd.to_numeric(bblf, errors="coerce").round().astype("Int64")  # inteiro (nullable)
     else:
         df_evt_out["bbl"] = pd.Series(pd.NA, index=df_evt_out.index, dtype="Int64")
 
@@ -73,7 +73,7 @@ def run_ingestao() -> pd.DataFrame:
     else:
         df_evt_out["justificativa"] = ""
 
-    # --- AUDITORIA: salvar 10 primeiras linhas cruas vs. convertidas ---
+    # --- AUDITORIA: salvar 20 primeiras linhas cruas vs. convertidas ---
     try:
         audit = pd.DataFrame({
             "raw_periodo_h": raw_h.head(20) if len(raw_h) else pd.Series([], dtype=str),

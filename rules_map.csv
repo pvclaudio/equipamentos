@@ -1,0 +1,124 @@
+ativo,regex,equipamento
+*,\b(bomba|bba)\s+de\s+inje(c|ç)[aã]o\s*a\b,BOMBA DE INJEÇÃO A
+*,\b(bomba|bba)\s+de\s+inje(c|ç)[aã]o\s*b\b,BOMBA DE INJEÇÃO B
+*,\b(bomba|bba)\s+de\s+inje(c|ç)[aã]o\s*c\b,BOMBA DE INJEÇÃO C
+*,\b(bomba|bba)\s+de\s+inje(c|ç)[aã]o\s*d\b,BOMBA DE INJEÇÃO D
+*,\bbomba\s+inc[eê]ndio\s*norte\b,BOMBA INCÊNDIO NORTE
+*,\bbomba\s+inc[eê]ndio\s*sul\b,BOMBA INCÊNDIO SUL
+*,\bbomba\s+inc[eê]ndio\s*proa\b,BOMBA INCÊNDIO PROA
+*,\bbomba\s+inc[eê]ndio\s*popa\b,BOMBA INCÊNDIO POPA
+*,\bcompressor\s+de\s+ar\s*a\b,COMPRESSOR DE AR A
+*,\bcompressor\s+de\s+ar\s*b\b,COMPRESSOR DE AR B
+*,\bcompressor\s+de\s+ar\s*c\b,COMPRESSOR DE AR C
+*,\bcompressor\s+de\s+ar\s*d\b,COMPRESSOR DE AR D
+*,\bigg\s*a\b,IGG A
+*,\bigg\s*b\b,IGG B
+*,\bturbina\s*a\b,TURBINA A
+*,\bturbina\s*b\b,TURBINA B
+*,\bturbina\s*c\b,TURBINA C
+*,\bturbina\s*d\b,TURBINA D
+*,\bguindaste\s*norte\b,GUINDASTE NORTE
+*,\bguindaste\s*sul\b,GUINDASTE SUL
+*,\bguindaste\s*proa\b,GUINDASTE PROA
+*,\bguindaste\s*popa\b,GUINDASTE POPA
+*,\bguindaste\s*be\b,GUINDASTE BE
+*,\bguindaste\s*bb\b,GUINDASTE BB
+*,\bbaleeira\s*a\b,BALEEIRA A
+*,\bbaleeira\s*b\b,BALEEIRA B
+*,\bbaleeira\s*c\b,BALEEIRA C
+*,\bbaleeira\s*d\b,BALEEIRA D
+*,\bbaleeira\s*e\b,BALEEIRA E
+*,\bbaleeira\s*f\b,BALEEIRA F
+*,\bar[-\s]?condicionado\s*vsd\s*#?1\b,AR-CONDICIONADO VSD #1
+*,\bar[-\s]?condicionado\s*vsd\s*#?2\b,AR-CONDICIONADO VSD #2
+*,\bar[-\s]?condicionado\s*vsd\s*#?3\b,AR-CONDICIONADO VSD #3
+*,\bar[-\s]?condicionado\s*vsd\s*#?4\b,AR-CONDICIONADO VSD #4
+*,\bar[-\s]?condicionado\s*vsd\s*#?5\b,AR-CONDICIONADO VSD #5
+*,\bar[-\s]?condicionado\s*vsd\s*#?6\b,AR-CONDICIONADO VSD #6
+*,\bgerador\s+de\s+emerg[eê]ncia\b,GERADOR DE EMERGÊNCIA
+*,\bdg\s*1\b,DG 1 (Agrekko)
+*,\bdg\s*2\b,DG 2 (Agrekko)
+*,\bdg\s*3\b,DG 3 (Agrekko)
+*,\bdg\s*4\b,DG 4 (Agrekko)
+*,\bdg\s*5\b,DG 5 (Agrekko)
+*,\bdg\s*6\b,DG 6 (Agrekko)
+*,\bhaw?ser\s*bb\b,HAWSER BB
+*,\bhaw?ser\s*be\b,HAWSER BE
+*,\bbomba\s+booster\s*a\b,BOMBA BOOSTER A
+*,\bbomba\s+booster\s*b\b,BOMBA BOOSTER B
+*,\bbomba\s+booster\s*c\b,BOMBA BOOSTER C
+*,\bbb\s*multif[aá]sica\s*a\b,BB MULTIFÁSICA A
+*,\bbb\s*multif[aá]sica\s*b\b,BB MULTIFÁSICA B
+*,\bbb\s*multif[aá]sica\s*c\b,BB MULTIFÁSICA C
+*,\bmc\s*a\b,MC A
+*,\bmc\s*b\b,MC B
+*,\bmc\s*c\b,MC C
+*,\bcaldeira\s*bb\b,CALDEIRA BB
+*,\bcaldeira\s*be\b,CALDEIRA BE
+*,\bmangueira\s+de\s+acionamento\b,mangueira de acionamento
+# ====== VFD — somente com contexto de falha típico ======,,
+*,\b(vfd).*(input\s+protection\s+fault|instant[ae]ne?ous\s+over[-\s]?current)\b,VFD
+*,\bfalha\s+no?\s*vfd\b,VFD
+*,\bfonte\s+ac/?dc\b.*\bvfd\b,VFD
+# ====== Válvula pneumática master ======,,
+*,\bvalvul(a|a\s+pneum[aá]tica|a\s+pneumatica|a\s+pneum)\s+master\b,válvula pneumática
+# ====== BCS com contexto ======,,
+*,\bparad[ao]\s+manual\s+da\s+bcs\b,BCS
+# ====== MPP ======,,
+*,\bmpp[-\s]?1400\b,MPP-1400
+# ====== LPO / LGL — só com contexto de bloqueio/indicação ======,,
+*,\bbloqueio\b.*\blpo\b,LPO
+*,\bbloqueio\b.*\blgl\b,LGL
+*,\bindica[cç][aã]o\s+de\s+bloqueio\b.*\blpo\b,LPO
+*,\bindica[cç][aã]o\s+de\s+bloqueio\b.*\blgl\b,LGL
+# ====== TG-D (trip/menção) ======,,
+*,\btrip\s+da\s*tg[-\s]?d\b,TG-D
+*,\btg[-\s]?d\b,TG-D
+# ====== ESD3-P ======,,
+*,\besd3[-\s]?p\b,ESD3-P
+Frade,\b(lp[-\s]?ip)\b.*\btrip\b,LP/IP A (MOD 3)
+Frade,\btrip\b.*\b(lp[-\s]?ip)\b,LP/IP A (MOD 3)
+Frade,\bhp\b.*\btrip\b,HP A (MOD 3)
+Frade,\btrip\b.*\bhp\b,HP A (MOD 3)
+"# ""motor"" isolado é genérico – marque como NAO_CLASSIFICADO para auditoria",,
+Frade,\bmotor(es)?\b,NAO_CLASSIFICADO
+"# ""header"" costuma ser manifold/coletor – deixar explícito como não classificado",,
+Frade,\bheader(s)?\b,NAO_CLASSIFICADO
+# HVAC -> mapeamos para um VSD de ar-condicionado (ajuste depois se tiver o #),,
+Frade,\bhvac\b,AR-CONDICIONADO VSD #1
+"# ""poço"" genérico: não é equipamento – manter visível",,
+Forte,\bpo[cç]o(s)?\b,NAO_CLASSIFICADO
+Forte,-\s*po[cç]o(s)?\b,NAO_CLASSIFICADO
+# ESD2 -> mapeie para PSD (se usa PSD como canônico),,
+Forte,\besd[-\s_]?2\b,PSD
+# trip genérico – já existem regras globais, mantemos mais uma direcionada,
+Forte,\btrip\b.*\bhp\b,HP A (MOD 3)
+Forte,\btrip\b.*\blp[-\s]*ip\b,LP/IP A (MOD 3)
+"# ""tg"" costuma ser turbina de geração – fallback para TURBINA A (ajuste se souber o módulo)",,
+Forte,\btg\b,TURBINA A
+Forte,\btg[-\s]?[abcd]\b,TURBINA A
+# VFD com pontuação,,
+Bravo,\bvfd[.\-:;]?\b,VFD
+# poço/poços – não é equipamento (auditoria),,
+Bravo,\bpo[cç]o(s)?\b,NAO_CLASSIFICADO
+# trip/psd/turbina (reforços),,
+Bravo,\btrip\b.*\bhp\b,HP A (MOD 3)
+Bravo,\btrip\b.*\blp[-\s]*ip\b,LP/IP A (MOD 3)
+Bravo,\bpsd\b,PSD
+Bravo,\bturbina\b,TURBINA A
+Bravo,\bválvula pneumática master\b,válvula pneumática master
+Forte,\bP04A\b,P04A
+Bravo,\bgta-a\b,gta-a
+Forte,\bPMS das TGs\b,PMS das TGs
+Forte,\bcooling medium\b,cooling medium
+Forte,\bválvulas choke\b,válvulas choke
+Forte,\bcompressor booster\b,compressor booster
+Forte,\bscrubber\b,scrubber
+Bravo,\bscrubber\b,scrubber
+Bravo,\bbcs\b,BCS
+Frade,\bSlug Catcher\b,Slug Catcher
+Frade,\bpdg\b,PDG (Permanent Downhole Gauge)
+Bravo,\bsensores de fogo\b,sensores de fogo
+Frade,\blp-ip\b,LP-IP
+Bravo,\binversores\b,inversores
+Bravo,\bsistema de botoeiras ESD\b,sistema de botoeiras ESD

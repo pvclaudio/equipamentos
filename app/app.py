@@ -1,7 +1,20 @@
-# app/app.py
-import os
-import sys
+# =============================
+# Bootstrap de paths (IMPORTANTE)
+# =============================
+import os, sys
 from pathlib import Path
+
+# raiz do projeto: .../Lista de Equipamentos Críticos
+ROOT = Path(__file__).resolve().parents[1]
+# garante que src/ seja importável como pacote
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+# garante que "data/" e "outputs/" sejam relativos à raiz
+os.chdir(ROOT)
+
+# =============================
+# Imports padrão do app
+# =============================
 from io import BytesIO
 from collections import Counter
 import re
@@ -17,10 +30,6 @@ import urllib3
 # =============================
 st.set_page_config(page_title="Criticidade de Equipamentos PRIO", layout="wide")
 
-ROOT = Path(__file__).resolve().parents[1]  # raiz do projeto
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
-
 OUT_DIR = Path("outputs")
 DATA_DIR = Path("data")
 OUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -34,6 +43,7 @@ NAO_CLASSIFICADO = "NAO_CLASSIFICADO"
 from src.ingestao import run_ingestao
 from src.matching import aplicar_matching
 from src.whitelist import build_whitelist_map
+
 
 # Tenta importar o executor do agente
 try:
@@ -58,6 +68,7 @@ def ensure_pipeline() -> bool:
     ok = parquet_evt.exists() and parquet_log.exists()
     if not ok:
         st.error("Não consegui gerar os artefatos do pipeline. Verifique os arquivos em data/ e tente novamente.")
+        st.stop()  # não segue sem base
     return ok
 
 # =============================
@@ -106,7 +117,7 @@ def load_eventos_qualificados() -> pd.DataFrame:
     df = pd.read_parquet(fp)
     if "data_evento" in df.columns:
         df["data_evento"] = pd.to_datetime(df["data_evento"], errors="coerce")
-    for col in ("periodo_h","bbl"):
+    for col in ("periodo_h","bbl","perda_financeira_usd","brent_usd"):
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
     # garante string
@@ -246,7 +257,6 @@ if use_agent:
             else:
                 # monta whitelist localmente
                 wl_map = build_whitelist_map(
-                    # mantém união de top5 + overrides + backfill para recall
                     union_top5=True, include_overrides=True, include_static_backfill=True
                 )
 
@@ -317,7 +327,7 @@ if "evt_from_agent" in st.session_state:
     evt = st.session_state["evt_from_agent"]
 
 # =============================
-# Brent - aplicar
+# Brent - aplicar (aceita YYYYMM e YYYY-MM)
 # =============================
 def apply_brent(df: pd.DataFrame, brent_value: float | None, brent_series: dict[str, float] | None):
     df = df.copy()
@@ -334,8 +344,25 @@ def apply_brent(df: pd.DataFrame, brent_value: float | None, brent_series: dict[
         return df
 
     if brent_series:
-        yyyymm = df["data_evento"].dt.strftime("%Y-%m")
-        df["brent_usd"] = yyyymm.map(brent_series).astype(float)
+        # normaliza dicionário para suportar 'YYYYMM' e 'YYYY-MM'
+        brent_series_norm = {}
+        for k, v in brent_series.items():
+            ks = str(k).strip()
+            if not ks:
+                continue
+            brent_series_norm[ks] = float(v) if v is not None and not pd.isna(v) else np.nan
+            if "-" in ks:
+                brent_series_norm[ks.replace("-", "")] = brent_series_norm[ks]
+            else:
+                if len(ks) == 6 and ks.isdigit():
+                    brent_series_norm[f"{ks[:4]}-{ks[4:]}"] = brent_series_norm[ks]
+
+        y_m = df["data_evento"].dt.strftime("%Y-%m")
+        ymm = df["data_evento"].dt.strftime("%Y%m")
+        br1 = y_m.map(brent_series_norm)
+        br2 = ymm.map(brent_series_norm)
+        df["brent_usd"] = br1.combine_first(br2).astype(float)
+
         if brent_value is not None:
             df.loc[df["brent_usd"].isna(), "brent_usd"] = float(brent_value)
     else:
@@ -355,13 +382,24 @@ evt = apply_brent(evt, brent_value, brent_series)
 ativos = sorted(evt["ativo"].dropna().unique().tolist())
 ativo_sel = st.sidebar.multiselect("Ativo", options=ativos, default=ativos)
 
-dt_min, dt_max = evt["data_evento"].min(), evt["data_evento"].max()
-periodo = st.sidebar.date_input("Período", value=(dt_min, dt_max), min_value=dt_min, max_value=dt_max)
+# datas válidas
+valid_dates = evt["data_evento"].dropna()
+if valid_dates.empty:
+    # Sem datas válidas → não aplicamos filtro por data
+    today = pd.Timestamp.today().normalize().date()
+    dt_min = today
+    dt_max = today
+    st.warning("Base sem datas válidas. Exibindo tudo (filtro de datas desativado).")
+    periodo = (dt_min, dt_max)
+else:
+    dt_min = valid_dates.min().date()
+    dt_max = valid_dates.max().date()
+    periodo = st.sidebar.date_input("Período", value=(dt_min, dt_max), min_value=dt_min, max_value=dt_max)
 
 mask = pd.Series(True, index=evt.index)
 if ativo_sel:
     mask &= evt["ativo"].isin(ativo_sel)
-if isinstance(periodo, (list, tuple)) and len(periodo) == 2:
+if not valid_dates.empty and isinstance(periodo, (list, tuple)) and len(periodo) == 2:
     ini = pd.to_datetime(periodo[0]); fim = pd.to_datetime(periodo[1])
     mask &= (evt["data_evento"] >= ini) & (evt["data_evento"] <= fim)
 
@@ -468,8 +506,12 @@ else:
     # Eventos & LOG
     st.subheader("Eventos qualificados (após matching/IA)")
     st.dataframe(evt_f.sort_values(["ativo", "data_evento"]).reset_index(drop=True), use_container_width=True)
+    # export com data formatada (evita células vazias)
+    tmp_export = evt_f.copy()
+    if "data_evento" in tmp_export.columns and pd.api.types.is_datetime64_any_dtype(tmp_export["data_evento"]):
+        tmp_export["data_evento"] = tmp_export["data_evento"].dt.strftime("%Y-%m-%d")
     st.download_button(
-        "Baixar eventos qualificados (CSV)", data=_bytes_csv(evt_f), file_name="eventos_qualificados_filtrados.csv",
+        "Baixar eventos qualificados (CSV)", data=_bytes_csv(tmp_export), file_name="eventos_qualificados_filtrados.csv",
         mime="text/csv"
     )
 
@@ -484,7 +526,7 @@ else:
     log_view = log.copy()
     if ativo_sel:
         log_view = log_view[log_view["ativo"].isin(ativo_sel)]
-    if isinstance(periodo, (list, tuple)) and len(periodo) == 2 and "data_evento" in log_view.columns:
+    if not valid_dates.empty and isinstance(periodo, (list, tuple)) and len(periodo) == 2 and "data_evento" in log_view.columns:
         ini = pd.to_datetime(periodo[0]); fim = pd.to_datetime(periodo[1])
         log_view = log_view[(pd.to_datetime(log_view["data_evento"], errors="coerce") >= ini) &
                             (pd.to_datetime(log_view["data_evento"], errors="coerce") <= fim)]

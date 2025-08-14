@@ -1,8 +1,7 @@
-# src/utils.py
 from __future__ import annotations
 from pathlib import Path
 import re
-from typing import Iterable, List, Sequence
+from typing import Iterable, List, Sequence, Any
 
 import numpy as np
 import pandas as pd
@@ -128,9 +127,61 @@ def coerce_cols_ptbr(df: pd.DataFrame, cols: Sequence[str]) -> pd.DataFrame:
 # =========================
 # Datas
 # =========================
+ISO_WITH_OPT_TIME_RX = re.compile(
+    r"^\s*\d{4}-\d{1,2}-\d{1,2}([ T]\d{1,2}:\d{2}(:\d{2})?)?\s*$"
+)
+
 def parse_data_ptbr(s):
     """Interpreta datas no padrão dia/mês/ano (tolerante)."""
     return pd.to_datetime(s, dayfirst=True, errors="coerce")
+
+def parse_data_misto(s):
+    """
+    Converte datas em string que podem estar em:
+      - ISO: 'YYYY-MM-DD' (com ou sem hora)
+      - pt-BR: 'DD/MM/YYYY' (com ou sem hora)
+    Outros valores (vazio, inválido) viram NaT.
+    """
+    if pd.isna(s):
+        return pd.NaT
+    s = safe_str(s).strip()
+    if not s:
+        return pd.NaT
+    if ISO_WITH_OPT_TIME_RX.match(s):
+        return pd.to_datetime(s, errors="coerce", dayfirst=False)
+    return pd.to_datetime(s, errors="coerce", dayfirst=True)
+
+def parse_datetime_universal(series: pd.Series) -> pd.Series:
+    """
+    Parser universal (vetorizado) para Series de datas:
+      1) Tenta ISO (dayfirst=False)
+      2) Fallback pt-BR (dayfirst=True)
+      3) Fallback serial do Excel (origem 1899-12-30)
+    Retorna datetime64[ns] (naive) com NaT nos inválidos.
+    """
+    s = series.astype(str).str.strip()
+
+    # 1) ISO
+    dt1 = pd.to_datetime(s, errors="coerce", dayfirst=False)
+
+    # 2) dd/mm/yyyy (só onde falhou)
+    mask2 = dt1.isna()
+    dt2 = pd.to_datetime(s.where(mask2), errors="coerce", dayfirst=True)
+
+    # 3) serial do Excel (só onde ainda falhou)
+    mask3 = dt1.combine_first(dt2).isna()
+    num = pd.to_numeric(s.where(mask3), errors="coerce")
+    dt3 = pd.to_datetime(num, unit="d", origin="1899-12-30", errors="coerce")
+
+    out = dt1.combine_first(dt2).combine_first(dt3)
+
+    # remove timezone se aparecer por acaso
+    try:
+        out = out.dt.tz_localize(None)
+    except Exception:
+        pass
+
+    return out
 
 def coerce_datetime(df: pd.DataFrame, cols: Sequence[str], *, dayfirst: bool = False) -> pd.DataFrame:
     """Converte colunas para datetime (tolerante)."""
@@ -216,3 +267,28 @@ def salvar_parquet(df: pd.DataFrame, path: Path):
     """Salva DataFrame em parquet garantindo a pasta."""
     path.parent.mkdir(parents=True, exist_ok=True)
     df.to_parquet(path, index=False)
+
+def read_excel_safe(fp: Path | str, sheet: Any | None = None, dtype: Any = str, **kwargs) -> pd.DataFrame:
+    """
+    Lê Excel com tolerância:
+      - se 'sheet' for informado, tenta essa aba; se falhar, usa a primeira disponível
+      - mantém dtype=str (por padrão) para não perder vírgulas/zeros à esquerda
+      - levanta erros claros quando o arquivo não existir ou não tiver abas
+    """
+    p = Path(fp)
+    if not p.exists():
+        raise FileNotFoundError(f"Arquivo não encontrado: {p}")
+
+    try:
+        # tenta a aba indicada (ou índice 0 quando None)
+        sn = sheet if sheet is not None else 0
+        return pd.read_excel(p, sheet_name=sn, dtype=dtype, **kwargs)
+    except Exception:
+        # fallback: primeira aba existente
+        xls = pd.ExcelFile(p)
+        if not xls.sheet_names:
+            raise ValueError(f"Nenhuma planilha encontrada em {p}")
+        return pd.read_excel(p, sheet_name=xls.sheet_names[0], dtype=dtype, **kwargs)
+
+# Alias para compatibilidade com módulos que chamam com underscore
+_read_excel_safe = read_excel_safe

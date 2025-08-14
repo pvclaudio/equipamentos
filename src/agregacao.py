@@ -1,4 +1,4 @@
-# src/agregacao.py
+# src/agregacao.py (revisado)
 from __future__ import annotations
 from pathlib import Path
 from typing import Optional, Dict
@@ -18,18 +18,30 @@ def carregar_eventos_qualificados() -> pd.DataFrame:
     fp = OUT_DIR / "eventos_qualificados.parquet"
     if not fp.exists():
         raise FileNotFoundError(f"Não encontrei {fp}. Rode antes: python -m src.matching")
+
     df = pd.read_parquet(fp)
 
     # colunas mínimas esperadas
-    for c in ["ativo", "data_evento", "equipamento", "periodo_h", "bbl"]:
+    for c, default in (("ativo", None), ("data_evento", pd.NaT),
+                       ("equipamento", "NAO_CLASSIFICADO"), ("periodo_h", np.nan),
+                       ("bbl", pd.NA)):
         if c not in df.columns:
-            df[c] = pd.NA
+            df[c] = default
 
     # tipos
     df["data_evento"] = pd.to_datetime(df["data_evento"], errors="coerce")
-    for c in ("periodo_h", "bbl", "perda_financeira_usd", "brent_usd"):
-        if c in df.columns:
-            df[c] = pd.to_numeric(df[c], errors="coerce")
+
+    # período e bbl em numérico; bbl pode vir como Int64 → convertemos para float na sequência
+    df["periodo_h"] = pd.to_numeric(df["periodo_h"], errors="coerce")
+    df["bbl"] = pd.to_numeric(df["bbl"], errors="coerce")
+
+    # sanity logs (não quebram execução)
+    try:
+        total = len(df)
+        ok_dt = df["data_evento"].notna().sum()
+        print(f"[agregacao] data_evento válidas: {ok_dt}/{total}")
+    except Exception:
+        pass
 
     return df
 
@@ -37,9 +49,7 @@ def carregar_eventos_qualificados() -> pd.DataFrame:
 # Brent
 # =============================
 def _normalize_brent_dict(brent_mensal: Dict[str, float]) -> Dict[str, float]:
-    """
-    Normaliza chaves do dicionário mensal para 'YYYYMM', aceitando 'YYYYMM' ou 'YYYY-MM'.
-    """
+    """Normaliza chaves do dicionário mensal para 'YYYYMM', aceitando 'YYYYMM' ou 'YYYY-MM'."""
     out: Dict[str, float] = {}
     for k, v in brent_mensal.items():
         ks = str(k).strip()
@@ -62,27 +72,24 @@ def aplicar_brent(
     """
     df = df.copy()
     df["data_evento"] = pd.to_datetime(df["data_evento"], errors="coerce")
-    for c in ("bbl",):
-        if c in df.columns:
-            df[c] = pd.to_numeric(df[c], errors="coerce")
+    df["bbl"] = pd.to_numeric(df.get("bbl", np.nan), errors="coerce")
 
+    # Série mensal (opcional)
     if brent_mensal:
         bm = _normalize_brent_dict(brent_mensal)
-        df["_yyyymm"] = yyyymm_key(df["data_evento"])  # "YYYYMM"
+        # yyyymm_key deve tolerar NaT (retornar NaN/None sem quebrar)
+        df["_yyyymm"] = yyyymm_key(df["data_evento"])
         df["brent_usd"] = df["_yyyymm"].map(bm).astype(float)
     else:
-        bm = None
         df["brent_usd"] = np.nan
 
-    # fallback para lacunas da série mensal
+    # Fallback único
     if brent_unico_usd is None:
         brent_unico_usd = float(os.getenv("BRENT_USD_DEFAULT", "80"))
     df["brent_usd"] = df["brent_usd"].fillna(float(brent_unico_usd))
 
-    # perda financeira = bbl * brent
-    if "bbl" not in df.columns:
-        df["bbl"] = 0.0
-    df["perda_financeira_usd"] = df["bbl"].fillna(0) * df["brent_usd"].fillna(0)
+    # perda financeira = bbl * brent (assegura float)
+    df["perda_financeira_usd"] = df["bbl"].fillna(0).astype(float) * df["brent_usd"].fillna(0).astype(float)
 
     # limpeza
     if "_yyyymm" in df.columns:
@@ -100,17 +107,18 @@ def agregar(df: pd.DataFrame) -> pd.DataFrame:
         if c in df.columns:
             df[c] = pd.to_numeric(df[c], errors="coerce")
 
+    # usa size() para contar eventos independentemente de nulos (equipamento/ativo já vêm preenchidos)
     agg = (
-        df.groupby(["ativo", "equipamento"], as_index=False)
+        df.groupby(["ativo", "equipamento"], dropna=False)
           .agg(
-              eventos=("equipamento", "count"),
+              eventos=("equipamento", "size"),
               horas_paradas_total=("periodo_h", "sum"),
               bbl_perdidos_total=("bbl", "sum"),
               perda_financeira_total_USD=("perda_financeira_usd", "sum"),
           )
+          .reset_index()
+          .sort_values(["ativo", "perda_financeira_total_USD"], ascending=[True, False])
     )
-    # ordenar por USD desc dentro do ativo
-    agg = agg.sort_values(["ativo", "perda_financeira_total_USD"], ascending=[True, False])
     return agg
 
 # =============================
@@ -130,5 +138,4 @@ def run_agregacao(
     print(f"Agregações geradas: {len(agg)} linhas -> outputs/agregado_ativo_equip.*")
 
 if __name__ == "__main__":
-    # exemplo: valor único de Brent (ajuste depois no app)
     run_agregacao(brent_unico_usd=80.0)

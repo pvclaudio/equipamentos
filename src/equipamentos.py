@@ -5,7 +5,7 @@ from typing import Dict, Set, Tuple, List
 import re
 import pandas as pd
 
-from .utils import normalize_ativo, strip_accents_lower
+from .utils import normalize_ativo, strip_accents_lower, _read_excel_safe
 
 DATA_DIR = Path("data")
 OUT_DIR = Path("outputs")
@@ -28,17 +28,54 @@ def _split_top5(text: str) -> List[str]:
     parts = [re.sub(r"\s+", " ", p) for p in parts]
     return parts
 
-def _read_excel_safe(fp: Path, sheet: str | None = None, dtype=str) -> pd.DataFrame:
-    """Tenta ler a planilha 'sheet'; em caso de falha, usa a primeira disponível."""
-    if not fp.exists():
-        raise FileNotFoundError(f"Arquivo não encontrado: {fp}")
+def _ensure_eventos_base() -> pd.DataFrame:
+    """
+    Garante a existência de outputs/eventos_base.parquet (gerado pela ingestão).
+    Se não existir, tenta rodar a ingestão automaticamente.
+    Depois de carregar, revalida tipos e faz logs de sanidade.
+    """
+    fp_evt = OUT_DIR / "eventos_base.parquet"
+    if not fp_evt.exists():
+        # Import tardio para evitar import circular quando chamado via app.py
+        try:
+            from .ingestao import run_ingestao
+            print("[equipamentos] eventos_base.parquet ausente. Rodando ingestão...")
+            run_ingestao()
+        except Exception as e:
+            raise RuntimeError(f"Falha ao executar ingestão automaticamente: {e}") from e
+
+    if not fp_evt.exists():
+        raise FileNotFoundError("outputs/eventos_base.parquet não encontrado após tentar rodar a ingestão.")
+
+    df = pd.read_parquet(fp_evt)
+
+    # --- Blindagem: colunas mínimas + tipos ---
+    for c, default in (("ativo", None), ("data_evento", pd.NaT),
+                       ("justificativa", ""), ("periodo_h", np.nan), ("bbl", pd.NA)):
+        if c not in df.columns:
+            df[c] = default
+
+    # Revalida tipos críticos
+    df["data_evento"] = pd.to_datetime(df["data_evento"], errors="coerce")
+    df["periodo_h"]   = pd.to_numeric(df["periodo_h"], errors="coerce")
+    df["bbl"]         = pd.to_numeric(df["bbl"], errors="coerce")
+
+    # Log de sanidade
     try:
-        return pd.read_excel(fp, sheet_name=sheet if sheet else 0, dtype=dtype)
+        total = len(df)
+        ok_dt = df["data_evento"].notna().sum()
+        print(f"[equipamentos] eventos_base: datas válidas {ok_dt}/{total}")
     except Exception:
-        xls = pd.ExcelFile(fp)
-        if not xls.sheet_names:
-            raise ValueError(f"Nenhuma planilha encontrada em {fp}")
-        return pd.read_excel(fp, sheet_name=xls.sheet_names[0], dtype=dtype)
+        pass
+
+    # (Opcional) Se preferir, force falha quando 0 datas válidas:
+    if df["data_evento"].notna().sum() == 0:
+        raise RuntimeError(
+            "events_base sem datas válidas (NaT). Verifique a ingestão da coluna 'Dia' antes do matching."
+        )
+
+    return df
+
 
 def _ensure_eventos_base() -> pd.DataFrame:
     """
